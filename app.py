@@ -1,6 +1,8 @@
-from flask import Flask, jsonify, request, json
+from flask import Flask, jsonify, request, abort
 from flaskext.mysql import MySQL
 from facebook import GraphAPI
+import pagination
+
 
 #initialize Flask app#  MySQL Database
 app = Flask(__name__)
@@ -14,8 +16,8 @@ mysql.init_app(app)
 conn = mysql.connect()
 cursor = conn.cursor()
 
-# initialize Graph API Access Token
-token = 'EAAIzpxUzyoMBAGRX6WheITfieVm9E9pPDZB0y9an6kh7U59EqARYo56gtSvP8prDzSwLZBKED8RbWFoOlje48DzJ1XHnfmvlP5DjjnJcN4WeMurOsJCiPTAiYXnuCoCcWbGQYVTpeDgyH1MEP5QgZBHZCQZCiP5f8b1rCQkjtgkGKabwwh8h1Axp4CSu6Md9nELf9448vXB0kJ2ZC6NfZAftee7Vq0d2lo6415SNkXasgZDZD'
+# initialize Graph API Access Token (must be changed for each user)
+token = 'EAAIzpxUzyoMBAC2rq6ZBvm6h9e0sE8O780Qum2yI8RtgpHkvk0igcayXM8NTa42BFbiFCLdjCCSjCZAckKBjgOwyVpE5eYXlW3CryHY1IGeYL3oQB6XSy6mB3tfGSWYx936DJwPF7KRpf64CJrRfzaiAjYmD941gksbxZAtg7UGf4WoTBOp9r3rQ3vK9SXhU7bHpumuSPSO6l3beXYZCziZAubrWKZAWUrsVyax5xH2pPkEjLKztzV'
 graph = GraphAPI(access_token=token)
 
 
@@ -62,8 +64,10 @@ def get_user(facebookID):
                 return "err: " + str(data[0])
 
 
-@app.route('/users/<facebookID>/posts', methods=['GET'])
-def get_posts(facebookID):
+@app.route('/users/<facebookID>/posts', defaults={'page' : 1}, methods=['GET'])
+@app.route('/users/<facebookID>/posts/page/<int:page>', methods=['GET'])
+def get_posts(facebookID, page):
+    page_content = {}
     # get query param ?local
     local = request.args.get('local')
 
@@ -78,7 +82,7 @@ def get_posts(facebookID):
         else:
             return jsonify(data)
 
-    #request user's posts
+    # request user's posts
     user_posts = graph.request('/' + str(facebookID) + '/posts?limit=25')
     posts = user_posts['data']
 
@@ -97,17 +101,17 @@ def get_posts(facebookID):
         i = 0
 
         for i in range(0, len(posts)):
-            #compare last entry with each post in fetched posts
+            # compare last entry with each post in fetched posts
             if data[0][0] == posts[i]['id']:
                 break
 
-            #if last post in database is not reached yet, add post[i]
+            # if last post in database is not reached yet, add post[i]
             cursor.callproc('sp_createPost', (posts[i]['id'], facebookID, posts[i]['message'], posts[i]['created_time']))
             d = cursor.fetchall()
             if len(d) is 0:
                 conn.commit()
 
-        #delete outdated posts
+        # delete outdated posts
         if i > 0:
             count = len(data) + i
             for i in range(0, count - 25):
@@ -116,10 +120,64 @@ def get_posts(facebookID):
                 conn.commit()
 
 
-    query = "SELECT * FROM posts ORDER BY created_time DESC"
+
+    query = "SELECT * FROM posts WHERE user_id = '" + facebookID + "' ORDER BY created_time DESC"
     cursor.execute(query)
+    row_headers = [x[0] for x in cursor.description]
     data = cursor.fetchall()
-    return jsonify(data)
+    json_data = []
+    for entry in data:
+        json_data.append(dict(zip(row_headers, entry)))
+    count = len(data)
+
+    pg = pagination.Pagination(count, page)
+    offset = (page - 1) * pg.page_size
+    page_content['data'] = json_data[offset + 1: offset + pg.page_size + 1]
+
+    if not page_content['data']:
+        abort(404)
+
+    page_content['offset'] = offset
+    page_content['total'] = count
+    page_content['page'] = page
+
+    if pg.has_next():
+        page_content['next'] = str(request.url_root) + 'users/' + facebookID + '/posts/page/' + str(page + 1)
+    if pg.has_previous():
+        page_content['previous'] = str(request.url_root) + 'users/' + facebookID + '/posts/page/' + str(page - 1)
+
+    return jsonify(page_content)
+
+
+@app.route('/users/', defaults={'page' : 1})
+@app.route('/users/page/<int:page>', methods=['GET'])
+def get_users(page):
+    page_content = {}
+    query = "SELECT * FROM users"
+    cursor.execute(query)
+    row_headers = [x[0] for x in cursor.description]
+    data = cursor.fetchall()
+    json_data = []
+    for entry in data:
+        json_data.append(dict(zip(row_headers, entry)))
+    count = len(data)
+
+    if count == 0:
+        'No Users Found!'
+    else:
+        pg = pagination.Pagination(count, page)
+        offset = (page - 1) * pg.page_size
+        page_content['data'] = json_data[offset + 1 : offset + pg.page_size + 1]
+        if not page_content['data']:
+            abort(404)
+        page_content['offset'] = offset
+        page_content['total'] = count
+        page_content['page'] = page
+        if pg.has_next():
+            page_content['next'] = str(request.url_root) + 'users/page/' + str(page + 1)
+        if pg.has_previous():
+            page_content['previous'] = str(request.url_root) + 'users/page/' + str(page - 1)
+        return jsonify(page_content)
 
 
 if __name__ == '__main__':
